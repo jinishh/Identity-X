@@ -1,0 +1,59 @@
+# Case-File Vault — one-command local run.
+#   docker compose up --build        → open http://localhost:5173
+# Local demo credentials only (same as scripts/db.sh). Never use these outside a laptop demo.
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: cfv_super_dev
+      TZ: UTC
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/db-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5433:5432"   # for pgAdmin / psql from the host (optional)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d case_file_vault"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      CFV_DATABASE_URL: postgresql+psycopg://cfv_app:cfv_app_dev@db:5432/case_file_vault
+      CFV_OWNER_DATABASE_URL: postgresql+psycopg://cfv_owner:cfv_owner_dev@db:5432/case_file_vault
+      CFV_OWNER_DSN: host=db port=5432 dbname=case_file_vault user=cfv_owner password=cfv_owner_dev
+      CFV_FRONTEND_ORIGIN: http://localhost:5173
+    volumes:
+      - vaultdata:/srv/backend/data   # encrypted files, sealed checkpoints, keys
+    ports:
+      - "8010:8010"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8010/docs')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  web:
+    build:
+      context: ./frontend
+    environment:
+      API_PROXY_TARGET: http://api:8010
+    ports:
+      - "5173:5173"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  vaultdata:

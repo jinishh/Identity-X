@@ -1,0 +1,154 @@
+@import "tailwindcss";
+@import "@fontsource/geist-sans/400.css";
+@import "@fontsource/geist-sans/500.css";
+@import "@fontsource/geist-sans/600.css";
+@import "@fontsource/source-serif-4/400.css";
+@import "@fontsource/source-serif-4/600.css";
+@import "@fontsource/source-serif-4/700.css";
+@import "@fontsource/source-serif-4/400-italic.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+
+/*
+ * The app replaces paper case files, registers and rubber stamps — so it borrows their look.
+ * Warm paper surfaces, blue-black ink for anything you can act on, violet stamp ink for seals,
+ * sealing-wax red only when something is wrong. One warm grey family throughout.
+ */
+@theme {
+  --font-sans: "Geist Sans", "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Source Serif 4", Georgia, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  /* paper */
+  --color-canvas: #f1ede4;
+  --color-surface: #fbf9f4;
+  --color-sunken: #ebe6db;
+  --color-line: #ded7c7;
+  --color-line-strong: #c8bfab;
+
+  /* ink */
+  --color-ink: #1d1f24;
+  --color-ink-2: #3b3d43;
+  --color-muted: #6e6a60;
+  --color-faint: #9d978a;
+
+  /* blue-black ink: chrome and primary actions */
+  --color-navy-950: #121a2c;
+  --color-navy-900: #1a253d;
+  --color-navy-800: #22304d;
+  --color-navy-700: #2d3d5f;
+  --color-navy-600: #3d5078;
+  --color-navy-100: #e3e6ec;
+  --color-navy-50: #eff0f2;
+  --color-brand: #24365c;
+  --color-brand-hover: #1a2948;
+
+  /* the two "physical" accents */
+  --color-stamp: #4c3c86;        /* office rubber-stamp violet */
+  --color-stamp-bg: #efebf6;
+  --color-tape: #a8352b;         /* red tape / sealing wax */
+  --color-saffron: #b7791f;
+
+  /* states */
+  --color-ok: #2d6a3e;
+  --color-ok-bg: #eaf1e6;
+  --color-ok-line: #bcd2b5;
+  --color-warn: #8f5f14;
+  --color-warn-bg: #f7efdc;
+  --color-warn-line: #e3cc98;
+  --color-bad: #a3352b;
+  --color-bad-bg: #f7e6e1;
+  --color-bad-line: #e6bbb2;
+  --color-lock: #3d5a80;
+  --color-lock-bg: #e8edf3;
+  --color-lock-line: #c3cfdd;
+
+  /* sensitivity — colours of file-cover bands */
+  --color-s-internal: #7a7466;
+  --color-s-confidential: #2b5797;
+  --color-s-restricted: #b0561f;
+  --color-s-victim: #84305f;
+  --color-s-victim-bg: #f4e7ed;
+
+  --shadow-card: 0 1px 0 rgb(74 60 32 / 0.05), 0 1px 2px rgb(74 60 32 / 0.05);
+  --shadow-pop: 0 18px 40px -16px rgb(35 30 20 / 0.35), 0 2px 6px rgb(35 30 20 / 0.08);
+
+  --animate-fade-in: fade-in 180ms ease-out;
+  --animate-pop-in: pop-in 220ms cubic-bezier(0.2, 0.9, 0.3, 1.15);
+  --animate-step-in: step-in 260ms ease-out;
+  --animate-stamp: stamp 420ms cubic-bezier(0.3, 1.4, 0.5, 1);
+}
+
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes step-in {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: none; }
+}
+/* a stamp comes down hard, slightly too big, and settles */
+@keyframes stamp {
+  0% { opacity: 0; transform: rotate(var(--stamp-rot, -4deg)) scale(1.6); }
+  60% { opacity: 1; transform: rotate(var(--stamp-rot, -4deg)) scale(0.96); }
+  100% { opacity: 1; transform: rotate(var(--stamp-rot, -4deg)) scale(1); }
+}
+
+@layer base {
+  html { color-scheme: light; scroll-behavior: smooth; }
+  body {
+    @apply bg-canvas text-ink font-sans antialiased;
+    font-size: 14px;
+    line-height: 1.55;
+    font-variant-numeric: tabular-nums;
+  }
+  /* paper grain — breaks the flat digital look without costing contrast */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.5;
+    mix-blend-mode: multiply;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.45 0 0 0 0 0.38 0 0 0 0 0.25 0 0 0 0.09 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  #root { position: relative; z-index: 1; }
+  h1, h2, h3 { @apply text-ink; text-wrap: balance; }
+  p { text-wrap: pretty; }
+  :focus-visible { outline: 2px solid var(--color-brand); outline-offset: 2px; border-radius: 3px; }
+  ::selection { background: #e4dcc6; }
+}
+
+@layer components {
+  /* small caps instead of SHOUTED uppercase labels */
+  .smallcaps {
+    font-variant-caps: all-small-caps;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .serif { font-family: var(--font-serif); }
+  /* worn, uneven ink of a real rubber stamp */
+  .stamp-ink {
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='90' height='90'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='0.8' numOctaves='2' seed='7'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 -1.6 1.35'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='90' height='90'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='0.8' numOctaves='2' seed='7'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 -1.6 1.35'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  /* ruled-ledger rows */
+  .ledger tbody tr { border-top: 1px solid var(--color-line); }
+  .ledger thead th {
+    font-variant-caps: all-small-caps;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--color-muted);
+    border-bottom: 1.5px solid var(--color-ink-2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+}
+
+.react-pdf__Page__canvas { display: block; }

@@ -1,0 +1,10 @@
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.pyc
+.pgadmin
+backend/.pgdata
+backend/data
+frontend/dist
+frontend/public/models
+.git

@@ -1,0 +1,2825 @@
+openapi: 3.1.0
+info:
+  title: Case-File Vault API
+  version: 0.1.0
+  summary: Secure digital document management for legal & investigation documents (SIH26190).
+  description: |
+    Single source of truth for the frontend (MSW mocks + generated types) and the FastAPI backend.
+
+    Conventions
+    - All times are RFC 3339 UTC. All IDs are UUIDv7 unless stated.
+    - Errors are `application/problem+json` (RFC 9457) with a machine-readable `code`.
+    - `403` carries a deny reason code (see `DenyReason`); every 403 is also an `ACCESS_DENIED` audit event.
+    - `428` means an obligation is missing: `PURPOSE_REQUIRED` or `STEP_UP_REQUIRED`. Retry with the
+      purpose in the body / after `POST /auth/step-up`.
+    - Lists return `{ items, total, page, page_size }`; `page` is 1-based, `page_size` ≤ 100.
+  contact:
+    name: Team Identity X (186448)
+servers:
+  - url: http://localhost:8010/api/v1
+    description: Local backend
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+  - name: Dashboard
+  - name: Directory
+  - name: Cases
+  - name: Documents
+  - name: Versions
+  - name: Collaboration
+  - name: Certificates
+  - name: Search
+  - name: Settings
+  - name: Audit
+  - name: Alerts
+  - name: Public
+  - name: Demo
+  - name: System
+
+paths:
+  # ───────────────────────────── System ─────────────────────────────
+  /health:
+    get:
+      tags: [System]
+      operationId: getHealth
+      security: []
+      summary: Liveness and dependency status
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+  # ───────────────────────────── Auth ─────────────────────────────
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      security: []
+      summary: Step 1 — password. Always followed by MFA.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Password accepted; MFA (or MFA enrolment) required.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '423': { $ref: '#/components/responses/Locked' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /auth/mfa/verify:
+    post:
+      tags: [Auth]
+      operationId: verifyMfa
+      security: []
+      summary: Step 2 — TOTP. Returns access token; sets refresh cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MfaVerifyRequest' }
+      responses:
+        '200':
+          description: Authenticated
+          headers:
+            Set-Cookie:
+              description: '`cfv_refresh` — HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth'
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '423': { $ref: '#/components/responses/Locked' }
+  /auth/login/face:
+    post:
+      tags: [Auth]
+      operationId: loginFace
+      security: []
+      summary: First factor by face. Identifier optional (1:1 if given, else 1:N). Authenticator code still required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaceProof' }
+      responses:
+        '200':
+          description: Face matched; continue with the authenticator code.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '423': { $ref: '#/components/responses/Locked' }
+  /auth/activate:
+    post:
+      tags: [Auth]
+      operationId: activate
+      security: []
+      summary: First-time sign-in step 1 — email or mobile number plus the activation code from the admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identifier, activation_code]
+              properties:
+                identifier: { type: string }
+                activation_code: { type: string }
+      responses:
+        '200':
+          description: Code accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [activation_token, user, email, phone_masked]
+                properties:
+                  activation_token: { type: string }
+                  user: { $ref: '#/components/schemas/UserSummary' }
+                  email: { type: string }
+                  phone_masked: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/activate/password:
+    post:
+      tags: [Auth]
+      operationId: activationPassword
+      security: []
+      summary: First-time sign-in step 2 — choose a password; returns the authenticator QR.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [activation_token, password]
+              properties:
+                activation_token: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: Password set
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [otpauth_uri, secret]
+                properties:
+                  otpauth_uri: { type: string }
+                  secret: { type: string }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /auth/activate/confirm:
+    post:
+      tags: [Auth]
+      operationId: activationConfirm
+      security: []
+      summary: First-time sign-in step 3 — first code from the authenticator; activates and signs in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [activation_token, code]
+              properties:
+                activation_token: { type: string }
+                code: { type: string, pattern: '^[0-9]{6}$' }
+      responses:
+        '200':
+          description: Activated and signed in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshToken
+      security: []
+      summary: Rotate refresh cookie, get a new access token.
+      responses:
+        '200':
+          description: Refreshed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/step-up:
+    post:
+      tags: [Auth]
+      operationId: stepUp
+      summary: Re-enter TOTP; satisfies STEP_UP_REQUIRED for 5 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, pattern: '^[0-9]{6}$' }
+      responses:
+        '200':
+          description: Step-up valid
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [step_up_valid_until]
+                properties:
+                  step_up_valid_until: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Logout
+      responses:
+        '204': { description: Logged out; refresh session revoked }
+  /auth/me:
+    get:
+      tags: [Auth]
+      operationId: getMe
+      summary: Get me
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /me/security:
+    get:
+      tags: [Settings]
+      operationId: getMySecurity
+      summary: Sign-in methods, face enrolment and active sessions of the caller.
+      responses:
+        '200':
+          description: Security overview
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SecurityOverview' }
+  /me/face:
+    post:
+      tags: [Settings]
+      operationId: enrolFace
+      summary: Register (or replace) face sign-in. Needs a recent authenticator code (428 STEP_UP_REQUIRED).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaceProof' }
+      responses:
+        '201':
+          description: Enrolled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enrolled: { type: boolean }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
+  /me/face/remove:
+    post:
+      tags: [Settings]
+      operationId: removeFace
+      summary: Remove face sign-in
+      responses:
+        '200':
+          description: Removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enrolled: { type: boolean }
+  /me/password:
+    post:
+      tags: [Settings]
+      operationId: changePassword
+      summary: Change password (current password required)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string, format: password }
+                new_password: { type: string, format: password }
+      responses:
+        '200':
+          description: Changed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  changed: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /me/sessions/{sessionId}/revoke:
+    parameters:
+      - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Settings]
+      operationId: revokeSession
+      summary: End one of my sessions
+      responses:
+        '200':
+          description: Ended
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  revoked: { type: boolean }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ───────────────────────────── Dashboard ─────────────────────────────
+  /dashboard/summary:
+    get:
+      tags: [Dashboard]
+      operationId: getDashboardSummary
+      summary: Role-aware KPIs, my cases, recent activity.
+      responses:
+        '200':
+          description: Dashboard
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardSummary' }
+
+  # ───────────────────────────── Directory / Admin ─────────────────────────────
+  /units:
+    get:
+      tags: [Directory]
+      operationId: listUnits
+      summary: List units
+      responses:
+        '200':
+          description: All units (flat; build tree from parent_id)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Unit' }
+    post:
+      tags: [Directory]
+      operationId: createUnit
+      summary: SUPER_ADMIN only — add a unit under an existing one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, name, type, parent_id]
+              properties:
+                code: { type: string }
+                name: { type: string }
+                type: { $ref: '#/components/schemas/UnitType' }
+                parent_id: { type: string, format: uuid }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Unit' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /roles:
+    get:
+      tags: [Directory]
+      operationId: listRoles
+      summary: Roles and their system-wide permissions (from iam.roles / iam.role_permissions).
+      responses:
+        '200':
+          description: Roles
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Role' }
+  /directory:
+    get:
+      tags: [Directory]
+      operationId: searchDirectory
+      summary: Find users to add as members / share with / transfer custody to.
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 2 } }
+        - { name: role, in: query, schema: { $ref: '#/components/schemas/SystemRole' } }
+      responses:
+        '200':
+          description: Matching active users
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/UserSummary' }
+  /users:
+    get:
+      tags: [Directory]
+      operationId: listUsers
+      summary: ADMIN only.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - { name: q, in: query, schema: { type: string } }
+        - { name: role, in: query, schema: { $ref: '#/components/schemas/SystemRole' } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/UserStatus' } }
+      responses:
+        '200':
+          description: Users
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Directory]
+      operationId: createUser
+      summary: SUPER_ADMIN (any non-super role) or ADMIN (officers in their units). Returns a one-time activation code.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserCreate' }
+      responses:
+        '201':
+          description: Created as INVITED
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserInvitation' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /users/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [Directory]
+      operationId: getUser
+      summary: Get user
+      responses:
+        '200':
+          description: User
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Directory]
+      operationId: updateUser
+      summary: ADMIN only. Cannot change own role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserUpdate' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /users/{userId}/reset-access:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      tags: [Directory]
+      operationId: resetUserAccess
+      summary: Lost phone / forgotten password. Ends sessions, removes face sign-in, issues a new activation code.
+      responses:
+        '200':
+          description: Reset
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserInvitation' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ───────────────────────────── Cases ─────────────────────────────
+  /cases:
+    get:
+      tags: [Cases]
+      operationId: listCases
+      summary: Cases the caller can see (membership, jurisdiction, auditor metadata view).
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - { name: q, in: query, description: 'Case number, FIR number or title', schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/CaseStatus' } }
+        - { name: category, in: query, schema: { $ref: '#/components/schemas/CaseCategory' } }
+        - { name: mine, in: query, description: 'Only cases where I am a member', schema: { type: boolean } }
+        - { name: sort, in: query, schema: { type: string, enum: [updated_desc, created_desc, fir_date_desc, hearing_asc], default: updated_desc } }
+      responses:
+        '200':
+          description: Cases
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CasePage' }
+    post:
+      tags: [Cases]
+      operationId: createCase
+      summary: Create case
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CaseCreate' }
+      responses:
+        '201':
+          description: Created; caller becomes LEAD_IO (investigator) or must assign one (supervisor).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Case' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /cases/{caseId}:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    get:
+      tags: [Cases]
+      operationId: getCase
+      summary: Get case
+      responses:
+        '200':
+          description: Case
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Case' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Cases]
+      operationId: updateCase
+      summary: Update case
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CaseUpdate' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Case' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /cases/{caseId}/status:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Cases]
+      operationId: changeCaseStatus
+      summary: Change case status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CaseStatusChange' }
+      responses:
+        '200':
+          description: Status changed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Case' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /cases/{caseId}/members:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    get:
+      tags: [Cases]
+      operationId: listCaseMembers
+      summary: List case members
+      parameters:
+        - { name: include_removed, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: Members
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CaseMember' }
+    post:
+      tags: [Cases]
+      operationId: addCaseMember
+      summary: Add case member
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CaseMemberAdd' }
+      responses:
+        '201':
+          description: Added
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CaseMember' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /cases/{caseId}/members/{memberId}/remove:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+      - { name: memberId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Cases]
+      operationId: removeCaseMember
+      summary: Remove case member
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonBody' }
+      responses:
+        '204': { description: Removed }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /cases/{caseId}/timeline:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    get:
+      tags: [Cases]
+      operationId: getCaseTimeline
+      summary: Chain-of-custody timeline — audit events for this case, newest first.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Timeline
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditEventPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /cases/{caseId}/break-glass:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    post:
+      tags: [Cases]
+      operationId: startBreakGlass
+      summary: Emergency read access for 60 min. Requires step-up; raises HIGH alert.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BreakGlassCreate' }
+      responses:
+        '201':
+          description: Session started
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BreakGlassSession' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
+  /cases/{caseId}/documents:
+    parameters:
+      - $ref: '#/components/parameters/CaseId'
+    get:
+      tags: [Documents]
+      operationId: listCaseDocuments
+      summary: List case documents
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - { name: doc_type, in: query, schema: { $ref: '#/components/schemas/DocType' } }
+        - { name: sensitivity, in: query, schema: { $ref: '#/components/schemas/Sensitivity' } }
+        - { name: include_withdrawn, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: Documents
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Documents]
+      operationId: uploadDocument
+      summary: Upload v1 of a new document. Returns 202; poll processing.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/NewDocumentUpload' }
+            encoding:
+              metadata: { contentType: application/json }
+      responses:
+        '202':
+          description: Accepted for processing
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadAccepted' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  # ───────────────────────────── Documents ─────────────────────────────
+  /documents/{documentId}:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Documents]
+      operationId: getDocument
+      summary: Get document
+      responses:
+        '200':
+          description: Document with current version and caller's effective access
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Documents]
+      operationId: updateDocument
+      summary: Title / type / tags only. Sensitivity has its own endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DocumentUpdate' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /documents/{documentId}/sensitivity:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    post:
+      tags: [Documents]
+      operationId: changeSensitivity
+      summary: Raise (uploaders) or lower (SUPERVISOR, step-up, not own upload).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SensitivityChange' }
+      responses:
+        '200':
+          description: Changed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
+  /documents/{documentId}/versions:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Versions]
+      operationId: listVersions
+      summary: List versions
+      responses:
+        '200':
+          description: All versions, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Version' }
+    post:
+      tags: [Versions]
+      operationId: uploadVersion
+      summary: Upload a new version. Previous versions remain immutable.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/NewVersionUpload' }
+      responses:
+        '202':
+          description: Accepted for processing
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadAccepted' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /documents/{documentId}/legal-hold:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    post:
+      tags: [Documents]
+      operationId: setLegalHold
+      summary: Set legal hold
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonBody' }
+      responses:
+        '200':
+          description: On legal hold (also applied to stored objects)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /documents/{documentId}/legal-hold/release:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    post:
+      tags: [Documents]
+      operationId: requestLegalHoldRelease
+      summary: Creates a LEGAL_HOLD_RELEASE request; a different approver must decide.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonBody' }
+      responses:
+        '201':
+          description: Request created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Request' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /documents/{documentId}/withdraw:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    post:
+      tags: [Documents]
+      operationId: withdrawDocument
+      summary: Soft withdrawal (nothing is deleted). Blocked on LEGAL_HOLD.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonBody' }
+      responses:
+        '200':
+          description: Withdrawn
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /documents/{documentId}/timeline:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Documents]
+      operationId: getDocumentTimeline
+      summary: Chain of custody for one document, oldest first.
+      responses:
+        '200':
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditEvent' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /documents/{documentId}/shares:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      tags: [Collaboration]
+      operationId: listDocumentShares
+      summary: List document shares
+      responses:
+        '200':
+          description: Shares (active and past)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Share' }
+    post:
+      tags: [Collaboration]
+      operationId: requestShare
+      summary: Creates a SHARE request for supervisor approval.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ShareCreate' }
+      responses:
+        '201':
+          description: Request created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Request' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /documents/{documentId}/custody-transfers:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    post:
+      tags: [Collaboration]
+      operationId: initiateCustodyTransfer
+      summary: Current custodian only. Recipient must accept via the request inbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CustodyTransferCreate' }
+      responses:
+        '201':
+          description: Request created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Request' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /shares/{shareId}/revoke:
+    parameters:
+      - { name: shareId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Collaboration]
+      operationId: revokeShare
+      summary: Revoke share
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonBody' }
+      responses:
+        '200':
+          description: Revoked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Share' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /shared-with-me:
+    get:
+      tags: [Collaboration]
+      operationId: listSharedWithMe
+      summary: List shared with me
+      responses:
+        '200':
+          description: Active shares granted to the caller
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Share' }
+
+  # ───────────────────────────── Versions ─────────────────────────────
+  /versions/{versionId}:
+    parameters:
+      - $ref: '#/components/parameters/VersionId'
+    get:
+      tags: [Versions]
+      operationId: getVersion
+      summary: Get version
+      responses:
+        '200':
+          description: Version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Version' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /versions/{versionId}/processing:
+    parameters:
+      - $ref: '#/components/parameters/VersionId'
+    get:
+      tags: [Versions]
+      operationId: getProcessing
+      summary: Pipeline state. Poll every 1 s until status is terminal.
+      responses:
+        '200':
+          description: Processing state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProcessingState' }
+  /versions/{versionId}/access:
+    parameters:
+      - $ref: '#/components/parameters/VersionId'
+    post:
+      tags: [Versions]
+      operationId: requestContentAccess
+      summary: |
+        Evaluate access + obligations, audit the view/download, and return a short-lived
+        single-use content URL. May return a REDACTED variant instead of ORIGINAL if that is
+        all the caller may see (check `variant` in the response).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContentAccessRequest' }
+      responses:
+        '200':
+          description: Access granted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ContentAccessGrant' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
+  /content/{token}:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Versions]
+      operationId: getContent
+      security: []
+      summary: Streams decrypted (and watermarked, for inline views) bytes. Token is the credential; expires in 60 s, single use.
+      responses:
+        '200':
+          description: File bytes
+          content:
+            application/pdf:
+              schema: { type: string, contentMediaType: application/pdf }
+            image/png:
+              schema: { type: string, contentMediaType: image/png }
+            image/jpeg:
+              schema: { type: string, contentMediaType: image/jpeg }
+        '410':
+          description: Token expired or already used
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /versions/{versionId}/manifest:
+    parameters:
+      - $ref: '#/components/parameters/VersionId'
+    get:
+      tags: [Versions]
+      operationId: getManifest
+      summary: Get manifest
+      responses:
+        '200':
+          description: Signed manifest
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SignedManifest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /versions/{versionId}/verify:
+    parameters:
+      - $ref: '#/components/parameters/VersionId'
+    post:
+      tags: [Versions]
+      operationId: verifyVersion
+      summary: Full integrity check (object, lock, ciphertext, decrypt, hash, manifest, signature, audit anchor, version link).
+      responses:
+        '200':
+          description: Result (also when checks fail — inspect `overall`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VerificationResult' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /versions/{versionId}/entities:
+    parameters:
+      - $ref: '#/components/parameters/VersionId'
+    get:
+      tags: [Versions]
+      operationId: listEntities
+      summary: Extracted entities. Values of PII/victim identifiers are masked unless the caller may see the original.
+      parameters:
+        - { name: type, in: query, schema: { $ref: '#/components/schemas/EntityType' } }
+      responses:
+        '200':
+          description: Entities
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Entity' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /versions/{versionId}/redactions:
+    parameters:
+      - $ref: '#/components/parameters/VersionId'
+    get:
+      tags: [Versions]
+      operationId: listRedactions
+      summary: List redactions
+      responses:
+        '200':
+          description: Redacted derivatives of this version
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Derivative' }
+    post:
+      tags: [Versions]
+      operationId: createRedaction
+      summary: Generate a redacted copy (async). AUTO uses extracted PII; entity_ids lets the user choose.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RedactionCreate' }
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Derivative' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /versions/{versionId}/review:
+    parameters:
+      - $ref: '#/components/parameters/VersionId'
+    post:
+      tags: [Collaboration]
+      operationId: submitForReview
+      summary: CHARGESHEET / INVESTIGATION_REPORT only. Creates a REVIEW request.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note: { type: string, maxLength: 2000 }
+      responses:
+        '201':
+          description: Request created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Request' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /versions/{versionId}/certificates:
+    parameters:
+      - $ref: '#/components/parameters/VersionId'
+    get:
+      tags: [Certificates]
+      operationId: listVersionCertificates
+      summary: List version certificates
+      responses:
+        '200':
+          description: Certificates for this version
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Certificate' }
+    post:
+      tags: [Certificates]
+      operationId: issueCertificate
+      summary: Generate a BSA §63 certificate, pre-filled for signature.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CertificateIssue' }
+      responses:
+        '201':
+          description: Issued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Certificate' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ───────────────────────────── Certificates ─────────────────────────────
+  /certificates/{certificateId}:
+    parameters:
+      - { name: certificateId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Certificates]
+      operationId: getCertificate
+      summary: Get certificate
+      responses:
+        '200':
+          description: Certificate
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Certificate' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /certificates/{certificateId}/revoke:
+    parameters:
+      - { name: certificateId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Certificates]
+      operationId: revokeCertificate
+      summary: Revoke certificate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReasonBody' }
+      responses:
+        '200':
+          description: Revoked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Certificate' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ───────────────────────────── Requests (approval inbox) ─────────────────────────────
+  /requests:
+    get:
+      tags: [Collaboration]
+      operationId: listRequests
+      summary: List requests
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - { name: box, in: query, required: true, schema: { type: string, enum: [inbox, outbox] } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/RequestStatus' } }
+        - { name: type, in: query, schema: { $ref: '#/components/schemas/RequestType' } }
+      responses:
+        '200':
+          description: Requests
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RequestPage' }
+  /requests/{requestId}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      tags: [Collaboration]
+      operationId: getRequest
+      summary: Get request
+      responses:
+        '200':
+          description: Request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Request' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /requests/{requestId}/decision:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    post:
+      tags: [Collaboration]
+      operationId: decideRequest
+      summary: Approve / reject. Never by the requester. Approving a SHARE creates the share; a CUSTODY_TRANSFER moves custody.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RequestDecision' }
+      responses:
+        '200':
+          description: Decided
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Request' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /requests/{requestId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    post:
+      tags: [Collaboration]
+      operationId: cancelRequest
+      summary: Requester only, while PENDING.
+      responses:
+        '200':
+          description: Cancelled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Request' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ───────────────────────────── Search ─────────────────────────────
+  /search:
+    get:
+      tags: [Search]
+      operationId: search
+      summary: Access-aware search over metadata and OCR text. Snippets are redacted where the caller may only see redacted content.
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 2, maxLength: 300 } }
+        - { name: mode, in: query, schema: { type: string, enum: [keyword, fuzzy, semantic], default: keyword } }
+        - { name: case_id, in: query, schema: { type: string, format: uuid } }
+        - { name: doc_type, in: query, schema: { $ref: '#/components/schemas/DocType' } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Hits
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SearchResults' }
+
+  # ───────────────────────────── Audit ─────────────────────────────
+  /audit/events:
+    get:
+      tags: [Audit]
+      operationId: listAuditEvents
+      summary: List audit events
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - { name: case_id, in: query, schema: { type: string, format: uuid } }
+        - { name: document_id, in: query, schema: { type: string, format: uuid } }
+        - { name: actor_user_id, in: query, schema: { type: string, format: uuid } }
+        - { name: action, in: query, schema: { $ref: '#/components/schemas/AuditAction' } }
+        - { name: outcome, in: query, schema: { $ref: '#/components/schemas/AuditOutcome' } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: desc } }
+      responses:
+        '200':
+          description: Events
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditEventPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /audit/head:
+    get:
+      tags: [Audit]
+      operationId: getAuditHead
+      summary: Latest chain link and last sealed checkpoint (any signed-in user).
+      responses:
+        '200':
+          description: Head
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [head_seq, head_hash, sealed_upto]
+                properties:
+                  head_seq: { type: integer }
+                  head_hash: { type: string }
+                  at: { type: [string, 'null'], format: date-time }
+                  sealed_upto: { type: integer }
+                  sealed_at: { type: [string, 'null'], format: date-time }
+                  checkpoint_id: { type: [integer, 'null'] }
+  /audit/events/{seq}:
+    parameters:
+      - { name: seq, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    get:
+      tags: [Audit]
+      operationId: getAuditEvent
+      summary: Get audit event
+      responses:
+        '200':
+          description: Event incl. canonical form and hashes
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditEventDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /audit/verify-chain:
+    post:
+      tags: [Audit]
+      operationId: verifyAuditChain
+      summary: AUDITOR. Walks the chain and checkpoints; reports the first break.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from_seq: { type: integer, minimum: 1 }
+                to_seq: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChainVerificationResult' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /audit/checkpoints:
+    get:
+      tags: [Audit]
+      operationId: listCheckpoints
+      summary: List checkpoints
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Checkpoints, newest first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckpointPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /audit/export:
+    get:
+      tags: [Audit]
+      operationId: exportAudit
+      summary: AUDITOR. CSV export of the filtered range (the export itself is audited).
+      parameters:
+        - { name: case_id, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200':
+          description: CSV
+          content:
+            text/csv:
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ───────────────────────────── Alerts & break-glass ─────────────────────────────
+  /alerts:
+    get:
+      tags: [Alerts]
+      operationId: listAlerts
+      summary: List alerts
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/AlertStatus' } }
+        - { name: severity, in: query, schema: { $ref: '#/components/schemas/AlertSeverity' } }
+        - { name: type, in: query, schema: { $ref: '#/components/schemas/AlertType' } }
+      responses:
+        '200':
+          description: Alerts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /alerts/{alertId}/acknowledge:
+    parameters:
+      - $ref: '#/components/parameters/AlertId'
+    post:
+      tags: [Alerts]
+      operationId: acknowledgeAlert
+      summary: Acknowledge alert
+      responses:
+        '200':
+          description: Acknowledged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+  /alerts/{alertId}/resolve:
+    parameters:
+      - $ref: '#/components/parameters/AlertId'
+    post:
+      tags: [Alerts]
+      operationId: resolveAlert
+      summary: Resolve alert
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [note]
+              properties:
+                note: { type: string, minLength: 5, maxLength: 2000 }
+      responses:
+        '200':
+          description: Resolved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+  /break-glass:
+    get:
+      tags: [Alerts]
+      operationId: listBreakGlassSessions
+      summary: List break glass sessions
+      parameters:
+        - { name: pending_review, in: query, schema: { type: boolean } }
+      responses:
+        '200':
+          description: Sessions visible to caller (own; jurisdiction for supervisors; all for auditors)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BreakGlassSession' }
+  /break-glass/{sessionId}/end:
+    parameters:
+      - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Alerts]
+      operationId: endBreakGlass
+      summary: End break glass
+      responses:
+        '200':
+          description: Ended
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BreakGlassSession' }
+  /break-glass/{sessionId}/review:
+    parameters:
+      - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Alerts]
+      operationId: reviewBreakGlass
+      summary: Review break glass
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BreakGlassReview' }
+      responses:
+        '200':
+          description: Reviewed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BreakGlassSession' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ───────────────────────────── Public ─────────────────────────────
+  /public/certificates/{code}:
+    parameters:
+      - $ref: '#/components/parameters/VerificationCode'
+    get:
+      tags: [Public]
+      operationId: getPublicCertificate
+      security: []
+      summary: What the QR code opens. Only facts printed on the certificate.
+      responses:
+        '200':
+          description: Certificate summary
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicCertificate' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /public/verify/{code}:
+    parameters:
+      - $ref: '#/components/parameters/VerificationCode'
+    post:
+      tags: [Public]
+      operationId: publicVerify
+      security: []
+      summary: Compare a SHA-256 computed in the verifier's browser. The file is never uploaded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublicVerifyRequest' }
+      responses:
+        '200':
+          description: MATCH / MISMATCH
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicVerifyResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /public/keys:
+    get:
+      tags: [Public]
+      operationId: listPublicKeys
+      security: []
+      summary: Public keys for offline verification of manifests, checkpoints and certificates.
+      responses:
+        '200':
+          description: Keys
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PublicKey' }
+
+  # ───────────────────────────── Demo ─────────────────────────────
+  /demo/targets:
+    get:
+      tags: [Demo]
+      operationId: demoTargets
+      summary: ADMIN, DEMO_MODE only. Hero-case versions and suggested audit events for tamper scenarios.
+      responses:
+        '200':
+          description: Targets
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DemoTargets' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /demo/tamper:
+    post:
+      tags: [Demo]
+      operationId: demoTamper
+      summary: ADMIN, DEMO_MODE only. Executes a tamper scenario (see 03-integrity-model §7).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DemoTamperRequest' }
+      responses:
+        '200':
+          description: Executed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DemoTamperResult' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: DEMO_MODE disabled }
+  /demo/reset:
+    post:
+      tags: [Demo]
+      operationId: demoReset
+      summary: ADMIN, DEMO_MODE only. Restore seed snapshot.
+      responses:
+        '204': { description: Reset }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: DEMO_MODE disabled }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token, 15 min, held in memory only.
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CaseId:
+      name: caseId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    DocumentId:
+      name: documentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    VersionId:
+      name: versionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RequestId:
+      name: requestId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AlertId:
+      name: alertId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    VerificationCode:
+      name: code
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[A-Z2-7]{12}$' }
+
+  responses:
+    Unauthorized:
+      description: Not authenticated / bad credentials / bad TOTP
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Denied by policy; `code` is a DenyReason
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Not found
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: State conflict (e.g. LEGAL_HOLD, CASE_CLOSED, request already decided)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    ValidationError:
+      description: Invalid input; see `errors`
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PreconditionRequired:
+      description: Obligation missing — `code` is PURPOSE_REQUIRED or STEP_UP_REQUIRED
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Locked:
+      description: Account locked after repeated failures
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    TooManyRequests:
+      description: Rate limited
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PayloadTooLarge:
+      description: File exceeds 50 MB
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UnsupportedMediaType:
+      description: Detected file type not in allowlist (PDF, JPEG, PNG, TIFF)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    # ─────────── Enums ───────────
+    SystemRole:
+      type: string
+      enum: [SUPER_ADMIN, ADMIN, SUPERVISOR, INVESTIGATOR, PROSECUTOR, FORENSIC_EXPERT, AUDITOR]
+    UserStatus:
+      type: string
+      enum: [INVITED, ACTIVE, LOCKED, DISABLED]
+    UnitType:
+      type: string
+      enum: [STATE_HQ, DISTRICT_HQ, POLICE_STATION, FSL, PROSECUTION_OFFICE, NCRB_CELL]
+    CaseCapacity:
+      type: string
+      enum: [LEAD_IO, CO_IO, SUPERVISOR, PROSECUTOR, FORENSIC]
+    CaseCategory:
+      type: string
+      enum: [CRIME_AGAINST_WOMEN, CRIME_AGAINST_CHILDREN, CYBER, PROPERTY, BODILY_HARM, ECONOMIC, NARCOTICS, OTHER]
+    CaseStatus:
+      type: string
+      enum: [REGISTERED, UNDER_INVESTIGATION, CHARGESHEET_FILED, FINAL_REPORT_FILED, UNDER_TRIAL, DISPOSED, CLOSED]
+    Sensitivity:
+      type: string
+      enum: [INTERNAL, CONFIDENTIAL, RESTRICTED, VICTIM_PROTECTED]
+    RetentionState:
+      type: string
+      enum: [ACTIVE, LEGAL_HOLD, ARCHIVED]
+    DocumentStatus:
+      type: string
+      enum: [ACTIVE, WITHDRAWN]
+    DocType:
+      type: string
+      enum: [FIR, COMPLAINT, CASE_DIARY, WITNESS_STATEMENT, VICTIM_STATEMENT, ACCUSED_STATEMENT,
+             SEIZURE_MEMO, ARREST_MEMO, MEDICAL_REPORT, FORENSIC_REPORT, PHOTO_EVIDENCE, CCTV_STILL,
+             INVESTIGATION_REPORT, CHARGESHEET, COURT_FILING, COURT_ORDER, LEGAL_NOTICE, JUDGMENT, OTHER]
+    ProcessingStatus:
+      type: string
+      enum: [RECEIVED, PROCESSING, READY, QUARANTINED, FAILED]
+    ScanResult:
+      type: string
+      enum: [PENDING, CLEAN, INFECTED, SKIPPED, ERROR]
+    OcrStatus:
+      type: string
+      enum: [PENDING, DONE, NOT_APPLICABLE, FAILED]
+    ReviewStatus:
+      type: string
+      enum: [NOT_REQUIRED, PENDING, APPROVED, RETURNED]
+    StepName:
+      type: string
+      enum: [RECEIVE, HASH_MATCH, VALIDATE, MALWARE_SCAN, ENCRYPT, STORE_WORM, SIGN_MANIFEST,
+             AUDIT_ANCHOR, OCR, EXTRACT_ENTITIES, REDACT, INDEX, EMBED]
+    StepStatus:
+      type: string
+      enum: [PENDING, RUNNING, DONE, SKIPPED, FAILED]
+    ShareScope:
+      type: string
+      enum: [VIEW_REDACTED, VIEW, DOWNLOAD]
+    RequestType:
+      type: string
+      enum: [SHARE, CUSTODY_TRANSFER, REVIEW, LEGAL_HOLD_RELEASE, MEMBERSHIP]
+    RequestStatus:
+      type: string
+      enum: [PENDING, APPROVED, REJECTED, CANCELLED, EXPIRED]
+    EntityType:
+      type: string
+      enum: [PERSON, DATE, LOCATION, ORGANISATION, LEGAL_SECTION, CASE_REFERENCE, VEHICLE_NUMBER,
+             PHONE, AADHAAR, EMAIL, BANK_ACCOUNT, ADDRESS]
+    AuditOutcome:
+      type: string
+      enum: [SUCCESS, DENIED, FAILED]
+    AuditAction:
+      type: string
+      enum: [AUTH_LOGIN_SUCCEEDED, AUTH_LOGIN_FAILED, AUTH_MFA_FAILED, AUTH_STEP_UP, AUTH_LOGOUT, AUTH_LOCKED,
+             CASE_CREATED, CASE_UPDATED, CASE_STATUS_CHANGED, CASE_MEMBER_ADDED, CASE_MEMBER_REMOVED,
+             DOCUMENT_UPLOADED, VERSION_CREATED, VERSION_READY, VERSION_QUARANTINED, HASH_MISMATCH_ON_UPLOAD,
+             DOCUMENT_VIEWED, DOCUMENT_DOWNLOADED, REDACTED_VIEWED, REDACTION_CREATED, SENSITIVITY_CHANGED,
+             LEGAL_HOLD_SET, LEGAL_HOLD_RELEASED, DOCUMENT_WITHDRAWN,
+             REQUEST_CREATED, REQUEST_APPROVED, REQUEST_REJECTED, REQUEST_CANCELLED,
+             SHARE_GRANTED, SHARE_REVOKED, SHARE_EXPIRED, CUSTODY_TRANSFERRED,
+             REVIEW_SUBMITTED, REVIEW_APPROVED, REVIEW_RETURNED,
+             INTEGRITY_VERIFIED, INTEGRITY_FAILED, CERTIFICATE_ISSUED, CERTIFICATE_REVOKED, PUBLIC_VERIFICATION,
+             CHAIN_VERIFIED, CHAIN_BROKEN, CHECKPOINT_CREATED,
+             ACCESS_DENIED, BREAK_GLASS_STARTED, BREAK_GLASS_ENDED, BREAK_GLASS_REVIEWED, SEARCH_PERFORMED,
+             USER_CREATED, USER_UPDATED, USER_DISABLED, USER_MFA_RESET, ALERT_ACKNOWLEDGED, ALERT_RESOLVED,
+             AUTH_FACE_MATCHED, AUTH_FACE_FAILED, ACCOUNT_ACTIVATED, ACCOUNT_ACTIVATION_FAILED, FACE_ENROLLED,
+             FACE_REMOVED, PASSWORD_CHANGED, SESSION_REVOKED, UNIT_CREATED,
+             DEMO_TAMPER_EXECUTED, DEMO_RESET]
+    DenyReason:
+      type: string
+      enum: [UNAUTHENTICATED, ROLE_NOT_PERMITTED, NOT_A_CASE_MEMBER, ACTION_NOT_PERMITTED, SENSITIVITY,
+             CASE_CLOSED, LEGAL_HOLD, SELF_APPROVAL, SHARE_EXPIRED, BREAK_GLASS_EXPIRED]
+    AlertType:
+      type: string
+      enum: [INTEGRITY_FAILED, CHAIN_BROKEN, CHECKPOINT_MISMATCH, HASH_MISMATCH_ON_UPLOAD, MALWARE_DETECTED,
+             ACCESS_DENIED_BURST, BREAK_GLASS_USED, BREAK_GLASS_UNJUSTIFIED, VICTIM_RECORD_ACCESSED,
+             BULK_DOWNLOAD, OFF_HOURS_ACCESS]
+    AlertSeverity:
+      type: string
+      enum: [INFO, LOW, MEDIUM, HIGH, CRITICAL]
+    AlertStatus:
+      type: string
+      enum: [OPEN, ACKNOWLEDGED, RESOLVED]
+    CheckStatus:
+      type: string
+      enum: [PASS, FAIL, SKIPPED]
+
+    # ─────────── Common ───────────
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri-reference, example: 'https://cfv.local/problems/forbidden' }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        code:
+          type: string
+          description: DenyReason for 403; PURPOSE_REQUIRED / STEP_UP_REQUIRED for 428; otherwise a short code.
+        deny_reason:
+          $ref: '#/components/schemas/DenyReason'
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
+    PageMeta:
+      type: object
+      required: [total, page, page_size]
+      properties:
+        total: { type: integer }
+        page: { type: integer }
+        page_size: { type: integer }
+    ReasonBody:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+    Health:
+      type: object
+      required: [status, components]
+      properties:
+        status: { type: string, enum: [ok, degraded, down] }
+        demo_mode: { type: boolean }
+        components:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [ok, degraded, down, disabled]
+          example: { database: ok, object_store: ok, queue: ok, malware_scanner: disabled }
+
+    # ─────────── Auth / users ───────────
+    LoginRequest:
+      type: object
+      required: [identifier, password]
+      properties:
+        identifier: { type: string, description: 'Email, Indian mobile number or service ID', example: anjali.verma@nvpolice.example }
+        password: { type: string, format: password }
+    LoginResponse:
+      type: object
+      required: [mfa_token, first_factor, user]
+      properties:
+        mfa_token: { type: string, description: 'Short-lived (5 min), only usable for /auth/mfa/verify' }
+        first_factor: { type: string, enum: [PASSWORD, FACE] }
+        user: { $ref: '#/components/schemas/UserSummary' }
+    FaceProof:
+      type: object
+      required: [samples, liveness]
+      properties:
+        identifier: { type: [string, 'null'], description: 'Optional: who you claim to be (1:1). Omit for 1:N.' }
+        samples:
+          type: array
+          minItems: 3
+          maxItems: 10
+          description: 128-d face embeddings from consecutive frames, computed in the browser. No images.
+          items:
+            type: array
+            minItems: 128
+            maxItems: 128
+            items: { type: number }
+        liveness:
+          type: object
+          required: [blink]
+          properties:
+            blink: { type: boolean }
+            score: { type: number }
+    SecurityOverview:
+      type: object
+      required: [email, phone_masked, authenticator, sessions]
+      properties:
+        email: { type: string }
+        phone_masked: { type: string }
+        authenticator:
+          type: object
+          properties:
+            linked_at: { type: [string, 'null'], format: date-time }
+        face:
+          type: [object, 'null']
+          properties:
+            enrolled_at: { type: string, format: date-time }
+            model: { type: string }
+            samples: { type: integer }
+            quality: { type: [number, 'null'] }
+        sessions:
+          type: array
+          items:
+            type: object
+            required: [id, first_factor, created_at, current]
+            properties:
+              id: { type: string, format: uuid }
+              first_factor: { type: string, enum: [PASSWORD, FACE, ACTIVATION] }
+              created_at: { type: string, format: date-time }
+              last_seen_at: { type: [string, 'null'], format: date-time }
+              ip: { type: [string, 'null'] }
+              user_agent: { type: [string, 'null'] }
+              current: { type: boolean }
+        step_up_valid_until: { type: [string, 'null'], format: date-time }
+    Role:
+      type: object
+      required: [code, title, description, tier, is_administrative, sees_case_content, permissions]
+      properties:
+        code: { $ref: '#/components/schemas/SystemRole' }
+        title: { type: string }
+        description: { type: string }
+        tier: { type: integer }
+        is_administrative: { type: boolean }
+        sees_case_content: { type: boolean }
+        permissions: { type: array, items: { type: string } }
+    UserInvitation:
+      type: object
+      required: [user, activation_code, activation_expires_at]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        activation_code: { type: string, description: 'Shown once. Only its hash is stored.' }
+        activation_expires_at: { type: string, format: date-time }
+    MfaVerifyRequest:
+      type: object
+      required: [mfa_token, code]
+      properties:
+        mfa_token: { type: string }
+        code: { type: string, pattern: '^[0-9]{6}$' }
+    MfaEnrolment:
+      type: object
+      required: [otpauth_uri]
+      properties:
+        otpauth_uri: { type: string, description: 'Render as QR' }
+    TokenResponse:
+      type: object
+      required: [access_token, expires_in, user, first_factor]
+      properties:
+        access_token: { type: string }
+        expires_in: { type: integer, example: 900 }
+        first_factor: { type: string, enum: [PASSWORD, FACE, ACTIVATION] }
+        user: { $ref: '#/components/schemas/Me' }
+    UserSummary:
+      type: object
+      required: [id, service_id, full_name, role, unit_name]
+      properties:
+        id: { type: string, format: uuid }
+        service_id: { type: string }
+        full_name: { type: string }
+        rank: { type: [string, 'null'] }
+        role: { $ref: '#/components/schemas/SystemRole' }
+        unit_name: { type: string }
+    User:
+      allOf:
+        - $ref: '#/components/schemas/UserSummary'
+        - type: object
+          required: [unit_id, status, mfa_enabled, created_at]
+          properties:
+            unit_id: { type: string, format: uuid }
+            email: { type: [string, 'null'], format: email }
+            phone_masked: { type: [string, 'null'], example: '+91 ••••• ••321' }
+            status: { $ref: '#/components/schemas/UserStatus' }
+            mfa_enabled: { type: boolean }
+            face_enrolled: { type: [boolean, 'null'] }
+            role_title: { type: string }
+            last_login_at: { type: [string, 'null'], format: date-time }
+            activated_at: { type: [string, 'null'], format: date-time }
+            created_at: { type: string, format: date-time }
+    Me:
+      allOf:
+        - $ref: '#/components/schemas/User'
+        - type: object
+          required: [permissions]
+          properties:
+            permissions:
+              type: array
+              description: System-wide permissions (case-scoped ones come with each case/document).
+              items: { type: string }
+              example: ['case:create', 'search', 'request:decide']
+            step_up_valid_until: { type: [string, 'null'], format: date-time }
+    UserCreate:
+      type: object
+      required: [service_id, full_name, role, unit_id, email, phone]
+      properties:
+        service_id: { type: string, pattern: '^[A-Z]{2}-[A-Z]{2,4}-[0-9]{3,6}$' }
+        full_name: { type: string }
+        rank: { type: string }
+        role: { $ref: '#/components/schemas/SystemRole' }
+        unit_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        phone: { type: string, description: '10-digit Indian mobile number' }
+    UserUpdate:
+      type: object
+      properties:
+        full_name: { type: string }
+        rank: { type: string }
+        role: { $ref: '#/components/schemas/SystemRole' }
+        unit_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        phone: { type: string }
+        status: { $ref: '#/components/schemas/UserStatus' }
+    UserPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/User' } }
+    Unit:
+      type: object
+      required: [id, code, name, type]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        type: { $ref: '#/components/schemas/UnitType' }
+        parent_id: { type: [string, 'null'], format: uuid }
+        district: { type: [string, 'null'] }
+        state: { type: [string, 'null'] }
+
+    # ─────────── Dashboard ───────────
+    Kpi:
+      type: object
+      required: [key, label, value]
+      properties:
+        key: { type: string, example: encrypted_files }
+        label: { type: string, example: Encrypted files }
+        value: { type: number }
+        tone: { type: string, enum: [neutral, good, warn, bad], default: neutral }
+        hint: { type: string, example: '+12 this week' }
+        href: { type: string, description: 'Frontend route to drill into', example: '/alerts?status=OPEN' }
+    CountBy:
+      type: object
+      required: [key, count]
+      properties:
+        key: { type: string }
+        count: { type: integer }
+    DashboardSummary:
+      type: object
+      required: [role, kpis, my_cases, recent_activity, documents_by_type, cases_by_status, integrity]
+      properties:
+        role: { $ref: '#/components/schemas/SystemRole' }
+        kpis: { type: array, items: { $ref: '#/components/schemas/Kpi' } }
+        my_cases: { type: array, items: { $ref: '#/components/schemas/CaseSummary' } }
+        recent_activity: { type: array, items: { $ref: '#/components/schemas/AuditEvent' } }
+        documents_by_type: { type: array, items: { $ref: '#/components/schemas/CountBy' } }
+        cases_by_status: { type: array, items: { $ref: '#/components/schemas/CountBy' } }
+        integrity:
+          type: object
+          required: [versions_total, versions_verified]
+          properties:
+            versions_total: { type: integer }
+            versions_verified: { type: integer }
+            last_chain_check:
+              type: [object, 'null']
+              properties:
+                at: { type: string, format: date-time }
+                status: { type: string, enum: [VALID, BROKEN] }
+                events_checked: { type: integer }
+
+    # ─────────── Cases ───────────
+    CaseSummary:
+      type: object
+      required: [id, case_number, fir_number, title, category, status, is_victim_protected, unit_name, lead_io, document_count, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        case_number: { type: string, example: NV/SHN/0142/2026 }
+        fir_number: { type: string, example: 0142/2026 }
+        fir_date: { type: string, format: date }
+        title: { type: string }
+        category: { $ref: '#/components/schemas/CaseCategory' }
+        status: { $ref: '#/components/schemas/CaseStatus' }
+        is_victim_protected: { type: boolean }
+        unit_name: { type: string }
+        lead_io: { $ref: '#/components/schemas/UserSummary' }
+        document_count: { type: integer }
+        next_hearing_date: { type: [string, 'null'], format: date }
+        my_capacity:
+          oneOf:
+            - $ref: '#/components/schemas/CaseCapacity'
+            - type: 'null'
+        updated_at: { type: string, format: date-time }
+    Case:
+      allOf:
+        - $ref: '#/components/schemas/CaseSummary'
+        - type: object
+          required: [unit_id, offence_sections, default_sensitivity, created_at, my_permissions]
+          properties:
+            unit_id: { type: string, format: uuid }
+            offence_sections: { type: array, items: { type: string }, example: ['BNS 74', 'BNS 78'] }
+            victim_pseudonym: { type: [string, 'null'], example: V-1 }
+            default_sensitivity: { $ref: '#/components/schemas/Sensitivity' }
+            court_name: { type: [string, 'null'] }
+            description: { type: [string, 'null'] }
+            created_by: { $ref: '#/components/schemas/UserSummary' }
+            created_at: { type: string, format: date-time }
+            closed_at: { type: [string, 'null'], format: date-time }
+            break_glass_until:
+              type: [string, 'null']
+              format: date-time
+              description: Set when the caller is viewing via an active break-glass session.
+            my_permissions:
+              type: array
+              description: Case-scoped permissions the caller has right now (drive button visibility).
+              items: { type: string }
+              example: ['case:update', 'document:upload', 'case:manage_members']
+    CaseCreate:
+      type: object
+      required: [fir_number, fir_date, unit_id, title, category, offence_sections]
+      properties:
+        fir_number: { type: string, pattern: '^[0-9]{1,5}/[0-9]{4}$' }
+        fir_date: { type: string, format: date }
+        unit_id: { type: string, format: uuid }
+        title: { type: string, minLength: 5, maxLength: 200 }
+        category: { $ref: '#/components/schemas/CaseCategory' }
+        offence_sections: { type: array, minItems: 1, items: { type: string } }
+        description: { type: string, maxLength: 4000 }
+        lead_io_id: { type: string, format: uuid, description: 'Required when a SUPERVISOR creates the case' }
+    CaseUpdate:
+      type: object
+      properties:
+        title: { type: string, minLength: 5, maxLength: 200 }
+        offence_sections: { type: array, items: { type: string } }
+        description: { type: string, maxLength: 4000 }
+        court_name: { type: string }
+        next_hearing_date: { type: string, format: date }
+    CaseStatusChange:
+      type: object
+      required: [status, note]
+      properties:
+        status: { $ref: '#/components/schemas/CaseStatus' }
+        note: { type: string, minLength: 5, maxLength: 2000 }
+    CasePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/CaseSummary' } }
+    CaseMember:
+      type: object
+      required: [id, user, capacity, added_at, active]
+      properties:
+        id: { type: string, format: uuid }
+        user: { $ref: '#/components/schemas/UserSummary' }
+        capacity: { $ref: '#/components/schemas/CaseCapacity' }
+        implicit: { type: boolean, description: 'True for jurisdiction-derived supervisors (not removable)' }
+        added_by: { $ref: '#/components/schemas/UserSummary' }
+        added_at: { type: string, format: date-time }
+        expires_at: { type: [string, 'null'], format: date-time }
+        active: { type: boolean }
+        removed_at: { type: [string, 'null'], format: date-time }
+        removal_reason: { type: [string, 'null'] }
+    CaseMemberAdd:
+      type: object
+      required: [user_id, capacity]
+      properties:
+        user_id: { type: string, format: uuid }
+        capacity: { $ref: '#/components/schemas/CaseCapacity' }
+        expires_at: { type: string, format: date-time }
+
+    # ─────────── Documents & versions ───────────
+    EffectiveAccess:
+      type: object
+      description: What the caller may do with this document right now. The UI must not compute this itself.
+      required: [view, download, obligations, actions]
+      properties:
+        view: { type: string, enum: [ORIGINAL, REDACTED, NONE] }
+        download: { type: string, enum: [ORIGINAL, REDACTED, NONE] }
+        obligations:
+          type: array
+          items: { type: string, enum: [PURPOSE, STEP_UP, WATERMARK] }
+        via:
+          type: array
+          description: Where the access comes from.
+          items: { type: string, enum: [MEMBERSHIP, JURISDICTION, CUSTODY, SHARE, BREAK_GLASS] }
+        actions:
+          type: array
+          items: { type: string }
+          example: ['document:new_version', 'document:share_request', 'document:verify', 'certificate:issue']
+    DocumentSummary:
+      type: object
+      required: [id, doc_number, case_id, title, doc_type, sensitivity, retention_state, status, version_count, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        doc_number: { type: string, example: DOC-2026-000123 }
+        case_id: { type: string, format: uuid }
+        case_number: { type: string }
+        title: { type: string }
+        doc_type: { $ref: '#/components/schemas/DocType' }
+        sensitivity: { $ref: '#/components/schemas/Sensitivity' }
+        retention_state: { $ref: '#/components/schemas/RetentionState' }
+        status: { $ref: '#/components/schemas/DocumentStatus' }
+        version_count: { type: integer }
+        current_version:
+          oneOf:
+            - $ref: '#/components/schemas/VersionSummary'
+            - type: 'null'
+        custodian: { $ref: '#/components/schemas/UserSummary' }
+        tags: { type: array, items: { type: string } }
+        updated_at: { type: string, format: date-time }
+    Document:
+      allOf:
+        - $ref: '#/components/schemas/DocumentSummary'
+        - type: object
+          required: [created_by, created_at, access]
+          properties:
+            legal_hold:
+              type: [object, 'null']
+              properties:
+                reason: { type: string }
+                by: { $ref: '#/components/schemas/UserSummary' }
+                at: { type: string, format: date-time }
+            withdrawn:
+              type: [object, 'null']
+              properties:
+                reason: { type: string }
+                by: { $ref: '#/components/schemas/UserSummary' }
+                at: { type: string, format: date-time }
+            created_by: { $ref: '#/components/schemas/UserSummary' }
+            created_at: { type: string, format: date-time }
+            access: { $ref: '#/components/schemas/EffectiveAccess' }
+    DocumentPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/DocumentSummary' } }
+    DocumentUpdate:
+      type: object
+      properties:
+        title: { type: string, minLength: 3, maxLength: 200 }
+        doc_type: { $ref: '#/components/schemas/DocType' }
+        tags: { type: array, items: { type: string } }
+    SensitivityChange:
+      type: object
+      required: [sensitivity, reason]
+      properties:
+        sensitivity: { $ref: '#/components/schemas/Sensitivity' }
+        reason: { type: string, minLength: 10 }
+    UploadMetadata:
+      type: object
+      required: [title, doc_type, client_sha256]
+      properties:
+        title: { type: string, minLength: 3, maxLength: 200 }
+        doc_type: { $ref: '#/components/schemas/DocType' }
+        sensitivity:
+          $ref: '#/components/schemas/Sensitivity'
+          description: Defaults to the case default; cannot be lower than it.
+        tags: { type: array, items: { type: string } }
+        client_sha256: { type: string, pattern: '^[0-9a-f]{64}$', description: 'SHA-256 computed in the browser' }
+    NewDocumentUpload:
+      type: object
+      required: [file, metadata]
+      properties:
+        file: { type: string, contentMediaType: application/octet-stream }
+        metadata: { $ref: '#/components/schemas/UploadMetadata' }
+    NewVersionUpload:
+      type: object
+      required: [file, client_sha256, change_note]
+      properties:
+        file: { type: string, contentMediaType: application/octet-stream }
+        client_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        change_note: { type: string, minLength: 5, maxLength: 2000 }
+    UploadAccepted:
+      type: object
+      required: [document_id, version_id, version_no, processing_url]
+      properties:
+        document_id: { type: string, format: uuid }
+        version_id: { type: string, format: uuid }
+        version_no: { type: integer }
+        sha256: { type: string }
+        processing_url: { type: string, example: /api/v1/versions/0192…/processing }
+    VersionSummary:
+      type: object
+      required: [id, version_no, sha256, size_bytes, detected_mime, processing_status, uploaded_by, uploaded_at]
+      properties:
+        id: { type: string, format: uuid }
+        version_no: { type: integer }
+        sha256: { type: string }
+        size_bytes: { type: integer }
+        detected_mime: { type: string }
+        page_count: { type: [integer, 'null'] }
+        processing_status: { $ref: '#/components/schemas/ProcessingStatus' }
+        uploaded_by: { $ref: '#/components/schemas/UserSummary' }
+        uploaded_at: { type: string, format: date-time }
+    Version:
+      allOf:
+        - $ref: '#/components/schemas/VersionSummary'
+        - type: object
+          required: [document_id, original_filename, scan_result, ocr_status, review_status, signing_key_id, object_lock]
+          properties:
+            document_id: { type: string, format: uuid }
+            parent_version_id: { type: [string, 'null'], format: uuid }
+            prev_version_sha256: { type: [string, 'null'] }
+            change_note: { type: [string, 'null'] }
+            original_filename: { type: string }
+            scan_result: { $ref: '#/components/schemas/ScanResult' }
+            scan_detail: { type: [string, 'null'] }
+            ocr_status: { $ref: '#/components/schemas/OcrStatus' }
+            ocr_languages: { type: [string, 'null'], example: eng+hin }
+            review_status: { $ref: '#/components/schemas/ReviewStatus' }
+            manifest_sha256: { type: [string, 'null'] }
+            signing_key_id: { type: [string, 'null'] }
+            object_lock:
+              type: object
+              properties:
+                mode: { type: [string, 'null'], enum: [GOVERNANCE, COMPLIANCE, null] }
+                retain_until: { type: [string, 'null'], format: date-time }
+                legal_hold: { type: boolean }
+            last_verification:
+              type: [object, 'null']
+              properties:
+                at: { type: string, format: date-time }
+                overall: { type: string, enum: [VERIFIED, FAILED] }
+    ProcessingStep:
+      type: object
+      required: [step, seq, status]
+      properties:
+        step: { $ref: '#/components/schemas/StepName' }
+        seq: { type: integer }
+        status: { $ref: '#/components/schemas/StepStatus' }
+        critical: { type: boolean, description: 'Failure of a critical step means the version never becomes READY' }
+        started_at: { type: [string, 'null'], format: date-time }
+        finished_at: { type: [string, 'null'], format: date-time }
+        detail: { type: object, additionalProperties: true }
+    ProcessingState:
+      type: object
+      required: [version_id, status, steps]
+      properties:
+        version_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/ProcessingStatus' }
+        steps: { type: array, items: { $ref: '#/components/schemas/ProcessingStep' } }
+    ContentAccessRequest:
+      type: object
+      required: [variant, disposition]
+      properties:
+        variant: { type: string, enum: [ORIGINAL, REDACTED] }
+        disposition: { type: string, enum: [inline, attachment] }
+        purpose: { type: string, minLength: 10, maxLength: 500 }
+    ContentAccessGrant:
+      type: object
+      required: [url, expires_at, variant, watermark]
+      properties:
+        url: { type: string, example: /api/v1/content/eyJ… }
+        expires_at: { type: string, format: date-time }
+        variant: { type: string, enum: [ORIGINAL, REDACTED] }
+        watermark: { type: string, example: 'SI Anjali Verma · NV-IO-1045 · 02-10-2026 17:42 IST · NV/SHN/0142/2026' }
+        audit_seq: { type: integer }
+    SignedManifest:
+      type: object
+      required: [manifest, manifest_sha256, signature, signing_key_id, algorithm]
+      properties:
+        manifest: { type: object, additionalProperties: true, description: 'See 03-integrity-model §3' }
+        canonical: { type: string, description: 'Exact JCS bytes that were signed (UTF-8)' }
+        manifest_sha256: { type: string }
+        signature: { type: string, contentEncoding: base64 }
+        signing_key_id: { type: string }
+        algorithm: { type: string, const: Ed25519 }
+    VerificationCheck:
+      type: object
+      required: [name, status]
+      properties:
+        name:
+          type: string
+          enum: [object_present, object_locked, ciphertext_hash_match, decrypts, plaintext_hash_match,
+                 manifest_hash_match, signature_valid, audit_anchored, version_link_valid]
+        status: { $ref: '#/components/schemas/CheckStatus' }
+        expected: { type: [string, 'null'] }
+        actual: { type: [string, 'null'] }
+        detail: { type: [string, 'null'] }
+    VerificationResult:
+      type: object
+      required: [version_id, overall, checks, verified_at]
+      properties:
+        version_id: { type: string, format: uuid }
+        overall: { type: string, enum: [VERIFIED, FAILED] }
+        checks: { type: array, items: { $ref: '#/components/schemas/VerificationCheck' } }
+        verified_at: { type: string, format: date-time }
+        audit_seq: { type: integer }
+    Entity:
+      type: object
+      required: [id, type, value, page_no, is_pii, is_victim_identifier]
+      properties:
+        id: { type: integer }
+        type: { $ref: '#/components/schemas/EntityType' }
+        value: { type: string, description: 'Masked (e.g. "XXXX XXXX 4821") unless caller may view the original' }
+        page_no: { type: integer }
+        is_pii: { type: boolean }
+        is_victim_identifier: { type: boolean }
+        confidence: { type: number }
+        source: { type: string, enum: [REGEX, NER, MANUAL] }
+    RedactionCreate:
+      type: object
+      required: [mode]
+      properties:
+        mode: { type: string, enum: [AUTO, SELECTED] }
+        entity_ids: { type: array, items: { type: integer } }
+        entity_types: { type: array, items: { $ref: '#/components/schemas/EntityType' } }
+    Derivative:
+      type: object
+      required: [id, source_version_id, kind, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        source_version_id: { type: string, format: uuid }
+        kind: { type: string, enum: [REDACTED, CERTIFICATE_PDF, THUMBNAIL, OCR_PDF] }
+        status: { type: string, enum: [PENDING, READY, FAILED] }
+        sha256: { type: [string, 'null'] }
+        summary: { type: object, additionalProperties: true, example: { redacted_spans: 14, types: [PERSON, PHONE] } }
+        created_by: { $ref: '#/components/schemas/UserSummary' }
+        created_at: { type: string, format: date-time }
+
+    # ─────────── Collaboration ───────────
+    Share:
+      type: object
+      required: [id, document_id, grantee, scope, expires_at, created_at, active]
+      properties:
+        id: { type: string, format: uuid }
+        document_id: { type: string, format: uuid }
+        document_title: { type: string }
+        case_number: { type: string }
+        grantee: { $ref: '#/components/schemas/UserSummary' }
+        scope: { $ref: '#/components/schemas/ShareScope' }
+        expires_at: { type: string, format: date-time }
+        created_by: { $ref: '#/components/schemas/UserSummary' }
+        approved_by: { $ref: '#/components/schemas/UserSummary' }
+        created_at: { type: string, format: date-time }
+        active: { type: boolean }
+        revoked_at: { type: [string, 'null'], format: date-time }
+        revoke_reason: { type: [string, 'null'] }
+    ShareCreate:
+      type: object
+      required: [grantee_user_id, scope, expires_at, reason]
+      properties:
+        grantee_user_id: { type: string, format: uuid }
+        scope: { $ref: '#/components/schemas/ShareScope' }
+        expires_at: { type: string, format: date-time }
+        reason: { type: string, minLength: 10 }
+    CustodyTransferCreate:
+      type: object
+      required: [to_user_id, reason]
+      properties:
+        to_user_id: { type: string, format: uuid }
+        reason: { type: string, minLength: 10 }
+    Request:
+      type: object
+      required: [id, type, status, case_id, case_number, requested_by, reason, created_at, can_decide]
+      properties:
+        id: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/RequestType' }
+        status: { $ref: '#/components/schemas/RequestStatus' }
+        case_id: { type: string, format: uuid }
+        case_number: { type: string }
+        document_id: { type: [string, 'null'], format: uuid }
+        document_title: { type: [string, 'null'] }
+        version_id: { type: [string, 'null'], format: uuid }
+        requested_by: { $ref: '#/components/schemas/UserSummary' }
+        assigned_to:
+          oneOf:
+            - $ref: '#/components/schemas/UserSummary'
+            - type: 'null'
+        payload:
+          type: object
+          additionalProperties: true
+          description: |
+            SHARE → {grantee: UserSummary, scope, expires_at};
+            CUSTODY_TRANSFER → {from: UserSummary, to: UserSummary};
+            REVIEW → {version_no, note};
+            LEGAL_HOLD_RELEASE → {};
+            MEMBERSHIP → {user: UserSummary, capacity}
+        reason: { type: string }
+        decided_by:
+          oneOf:
+            - $ref: '#/components/schemas/UserSummary'
+            - type: 'null'
+        decided_at: { type: [string, 'null'], format: date-time }
+        decision_note: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        can_decide: { type: boolean, description: 'Whether the caller may approve/reject this request' }
+    RequestPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/Request' } }
+    RequestDecision:
+      type: object
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [APPROVE, REJECT] }
+        note: { type: string, maxLength: 2000, description: Required when rejecting }
+
+    # ─────────── Certificates ───────────
+    CertificateIssue:
+      type: object
+      required: [signatory_name, signatory_designation]
+      properties:
+        signatory_name: { type: string, description: 'Person in charge of the computer resource (Part A)' }
+        signatory_designation: { type: string }
+        purpose: { type: string, description: 'e.g. "Production before Sessions Court, Navagarh, SC 88/2026"' }
+    Certificate:
+      type: object
+      required: [id, cert_number, verification_code, version_id, sha256, status, issued_by, issued_at]
+      properties:
+        id: { type: string, format: uuid }
+        cert_number: { type: string, example: CFV-63-2026-000045 }
+        verification_code: { type: string, example: K7Q2M4XZ9BRA }
+        verify_url: { type: string, example: 'http://localhost:5173/verify/K7Q2M4XZ9BRA' }
+        version_id: { type: string, format: uuid }
+        document_id: { type: string, format: uuid }
+        doc_number: { type: string }
+        case_number: { type: string }
+        sha256: { type: string }
+        part_a: { type: object, additionalProperties: true }
+        part_b: { type: object, additionalProperties: true }
+        signatory_name: { type: string }
+        signatory_designation: { type: string }
+        pdf_url: { type: [string, 'null'], description: 'Obtain via /versions/{id}/access semantics; short-lived' }
+        status: { type: string, enum: [ISSUED, REVOKED] }
+        issued_by: { $ref: '#/components/schemas/UserSummary' }
+        issued_at: { type: string, format: date-time }
+        revoked_at: { type: [string, 'null'], format: date-time }
+        revoked_reason: { type: [string, 'null'] }
+    PublicCertificate:
+      type: object
+      required: [cert_number, case_number, doc_type, version_no, sha256, issued_at, status]
+      properties:
+        cert_number: { type: string }
+        case_number: { type: string }
+        doc_type: { $ref: '#/components/schemas/DocType' }
+        version_no: { type: integer }
+        sha256: { type: string }
+        size_bytes: { type: integer }
+        issued_at: { type: string, format: date-time }
+        issuing_unit: { type: string }
+        status: { type: string, enum: [ISSUED, REVOKED] }
+    PublicVerifyRequest:
+      type: object
+      required: [sha256]
+      properties:
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+    PublicVerifyResult:
+      type: object
+      required: [result, expected_sha256, provided_sha256, certificate_status, checked_at]
+      properties:
+        result: { type: string, enum: [MATCH, MISMATCH] }
+        expected_sha256: { type: string }
+        provided_sha256: { type: string }
+        certificate_status: { type: string, enum: [ISSUED, REVOKED] }
+        checked_at: { type: string, format: date-time }
+    PublicKey:
+      type: object
+      required: [kid, purpose, algorithm, public_key, created_at]
+      properties:
+        kid: { type: string }
+        purpose: { type: string, enum: [MANIFEST, CHECKPOINT, CERTIFICATE, USER_ATTESTATION] }
+        algorithm: { type: string, const: Ed25519 }
+        public_key: { type: string, contentEncoding: base64 }
+        created_at: { type: string, format: date-time }
+        retired_at: { type: [string, 'null'], format: date-time }
+
+    # ─────────── Search ───────────
+    SearchHit:
+      type: object
+      required: [document, score, match_type]
+      properties:
+        document: { $ref: '#/components/schemas/DocumentSummary' }
+        version_id: { type: string, format: uuid }
+        page_no: { type: [integer, 'null'] }
+        snippet: { type: [string, 'null'], description: 'Plain text; highlights given separately' }
+        highlights:
+          type: array
+          items:
+            type: object
+            required: [start, end]
+            properties:
+              start: { type: integer }
+              end: { type: integer }
+        redacted: { type: boolean, description: 'Snippet comes from the redacted text' }
+        score: { type: number }
+        match_type: { type: string, enum: [METADATA, KEYWORD, FUZZY, SEMANTIC] }
+    SearchResults:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items, mode, took_ms]
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/SearchHit' } }
+            mode: { type: string, enum: [keyword, fuzzy, semantic] }
+            took_ms: { type: integer }
+
+    # ─────────── Audit ───────────
+    AuditEvent:
+      type: object
+      required: [seq, id, occurred_at, action, outcome, event_hash, prev_hash]
+      properties:
+        seq: { type: integer }
+        id: { type: string, format: uuid }
+        occurred_at: { type: string, format: date-time }
+        actor:
+          oneOf:
+            - $ref: '#/components/schemas/UserSummary'
+            - type: 'null'
+        actor_role: { type: [string, 'null'] }
+        action: { $ref: '#/components/schemas/AuditAction' }
+        outcome: { $ref: '#/components/schemas/AuditOutcome' }
+        reason_code: { type: [string, 'null'] }
+        case_id: { type: [string, 'null'], format: uuid }
+        case_number: { type: [string, 'null'] }
+        document_id: { type: [string, 'null'], format: uuid }
+        document_title: { type: [string, 'null'] }
+        version_id: { type: [string, 'null'], format: uuid }
+        target_user:
+          oneOf:
+            - $ref: '#/components/schemas/UserSummary'
+            - type: 'null'
+        purpose: { type: [string, 'null'] }
+        summary: { type: string, description: 'Human-readable one-liner rendered by the server', example: 'Uploaded v2 of Witness Statement WS-2' }
+        details: { type: object, additionalProperties: true }
+        prev_hash: { type: string }
+        event_hash: { type: string }
+    AuditEventDetail:
+      allOf:
+        - $ref: '#/components/schemas/AuditEvent'
+        - type: object
+          required: [canonical]
+          properties:
+            canonical: { type: string, description: 'Exact JCS bytes hashed (UTF-8)' }
+            ip: { type: [string, 'null'] }
+            user_agent: { type: [string, 'null'] }
+            checkpoint_id: { type: [integer, 'null'], description: 'Checkpoint that seals this event, if any' }
+    AuditEventPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/AuditEvent' } }
+    ChainVerificationResult:
+      type: object
+      required: [status, events_checked, checkpoints_checked, verified_at]
+      properties:
+        status: { type: string, enum: [VALID, BROKEN] }
+        events_checked: { type: integer }
+        checkpoints_checked: { type: integer }
+        head_seq: { type: integer }
+        head_hash: { type: string }
+        first_break:
+          type: [object, 'null']
+          properties:
+            seq: { type: integer }
+            check:
+              type: string
+              enum: [PREV_HASH_LINK, EVENT_HASH, SEQ_GAP, CHECKPOINT_MERKLE, CHECKPOINT_HEAD, CHECKPOINT_SIGNATURE, CHECKPOINT_WORM_COPY]
+            expected: { type: string }
+            actual: { type: string }
+            checkpoint_id: { type: [integer, 'null'] }
+        verified_at: { type: string, format: date-time }
+        duration_ms: { type: integer }
+    Checkpoint:
+      type: object
+      required: [id, from_seq, to_seq, head_hash, merkle_root, event_count, created_at, signing_key_id]
+      properties:
+        id: { type: integer }
+        from_seq: { type: integer }
+        to_seq: { type: integer }
+        head_hash: { type: string }
+        merkle_root: { type: string }
+        event_count: { type: integer }
+        created_at: { type: string, format: date-time }
+        signing_key_id: { type: string }
+        signature: { type: string, contentEncoding: base64 }
+        worm_object_key: { type: string }
+        anchor:
+          type: [object, 'null']
+          properties:
+            network: { type: string }
+            tx: { type: string }
+            anchored_at: { type: string, format: date-time }
+    CheckpointPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/Checkpoint' } }
+
+    # ─────────── Alerts / break-glass ───────────
+    Alert:
+      type: object
+      required: [id, type, severity, title, message, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/AlertType' }
+        severity: { $ref: '#/components/schemas/AlertSeverity' }
+        title: { type: string }
+        message: { type: string }
+        case_id: { type: [string, 'null'], format: uuid }
+        case_number: { type: [string, 'null'] }
+        document_id: { type: [string, 'null'], format: uuid }
+        actor:
+          oneOf:
+            - $ref: '#/components/schemas/UserSummary'
+            - type: 'null'
+        audit_seq: { type: [integer, 'null'] }
+        status: { $ref: '#/components/schemas/AlertStatus' }
+        acknowledged_by:
+          oneOf:
+            - $ref: '#/components/schemas/UserSummary'
+            - type: 'null'
+        acknowledged_at: { type: [string, 'null'], format: date-time }
+        resolved_at: { type: [string, 'null'], format: date-time }
+        resolution_note: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+    AlertPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, items: { $ref: '#/components/schemas/Alert' } }
+    BreakGlassCreate:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 20, maxLength: 2000 }
+    BreakGlassSession:
+      type: object
+      required: [id, user, case_id, case_number, reason, started_at, expires_at]
+      properties:
+        id: { type: string, format: uuid }
+        user: { $ref: '#/components/schemas/UserSummary' }
+        case_id: { type: string, format: uuid }
+        case_number: { type: string }
+        reason: { type: string }
+        started_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        ended_at: { type: [string, 'null'], format: date-time }
+        events_during: { type: integer, description: 'Audit events recorded during the session' }
+        review_outcome: { type: [string, 'null'], enum: [JUSTIFIED, UNJUSTIFIED, null] }
+        reviewed_by:
+          oneOf:
+            - $ref: '#/components/schemas/UserSummary'
+            - type: 'null'
+        reviewed_at: { type: [string, 'null'], format: date-time }
+        review_note: { type: [string, 'null'] }
+    BreakGlassReview:
+      type: object
+      required: [outcome, note]
+      properties:
+        outcome: { type: string, enum: [JUSTIFIED, UNJUSTIFIED] }
+        note: { type: string, minLength: 5 }
+
+    # ─────────── Demo ───────────
+    DemoTargets:
+      type: object
+      required: [versions, head_seq, sealed_upto, suggested_seq]
+      properties:
+        versions:
+          type: array
+          items:
+            type: object
+            required: [version_id, title, doc_number]
+            properties:
+              version_id: { type: string, format: uuid }
+              title: { type: string }
+              doc_number: { type: string }
+        head_seq: { type: integer }
+        sealed_upto: { type: integer, description: 'Last audit seq covered by a sealed checkpoint' }
+        suggested_seq: { type: integer }
+    DemoTamperRequest:
+      type: object
+      required: [scenario]
+      properties:
+        scenario:
+          type: string
+          enum: [T2_OVERWRITE_STORED_OBJECT, T3_EDIT_AUDIT_ROW, T4_REWRITE_AUDIT_CHAIN, T5_REPLACE_CIPHERTEXT]
+          description: T1 (altered copy at portal) and T6 (in-transit change) are performed from the UI, not here.
+        version_id: { type: string, format: uuid, description: Target for T2 / T5 }
+        seq: { type: integer, description: Target for T3 / T4 }
+    DemoTamperResult:
+      type: object
+      required: [scenario, executed, message]
+      properties:
+        scenario: { type: string }
+        executed: { type: boolean, description: 'False when a control blocked it (e.g. WORM refused T2)' }
+        message: { type: string, example: 'Refused by object lock: retain-until 2036-10-02' }
+        next_step: { type: string, example: 'Run Audit → Verify chain' }
